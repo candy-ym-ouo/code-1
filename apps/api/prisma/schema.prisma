@@ -1,0 +1,190 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  OWNER
+  EDITOR
+  COMMENTER
+  VIEWER
+}
+
+enum RecordingStatus {
+  UPLOADING
+  PROCESSING
+  READY
+  FAILED
+}
+
+enum ChapterStatus {
+  DRAFT
+  PUBLISHED
+}
+
+model User {
+  id                String               @id @default(uuid())
+  email             String               @unique
+  passwordHash      String
+  displayName       String
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+  memberships       WorkspaceMember[]
+  ownedWorkspaces   Workspace[]          @relation("WorkspaceOwner")
+  recordings        Recording[]
+  clipsCreated      Clip[]               @relation("ClipCreatedBy")
+  clipsUpdated      Clip[]               @relation("ClipUpdatedBy")
+  chapters          Chapter[]
+  collaborationEvents CollaborationEvent[]
+}
+
+model Workspace {
+  id         String               @id @default(uuid())
+  name       String
+  timezone   String               @default("Asia/Shanghai")
+  ownerId    String
+  createdAt  DateTime             @default(now())
+  updatedAt  DateTime             @updatedAt
+  deletedAt  DateTime?
+  owner      User                 @relation("WorkspaceOwner", fields: [ownerId], references: [id], onDelete: Restrict)
+  members    WorkspaceMember[]
+  recordings Recording[]
+  people     Person[]
+  clips      Clip[]
+  chapters   Chapter[]
+  events     CollaborationEvent[]
+
+  @@index([ownerId])
+}
+
+model WorkspaceMember {
+  workspaceId String
+  userId      String
+  role        Role
+  joinedAt    DateTime  @default(now())
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([workspaceId, userId])
+  @@index([userId])
+}
+
+model Recording {
+  id              String          @id @default(uuid())
+  workspaceId     String
+  title           String
+  originalPath    String
+  playbackPath    String?
+  waveformPath    String?
+  mimeType        String
+  sizeBytes       BigInt
+  durationMs      Int
+  status          RecordingStatus @default(UPLOADING)
+  processingError String?
+  version         Int             @default(1)
+  createdById     String
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  workspace       Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdBy       User            @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  clips           Clip[]
+
+  @@index([workspaceId, updatedAt])
+  @@index([createdById])
+}
+
+model Person {
+  id          String    @id @default(uuid())
+  workspaceId String
+  name        String
+  aliases     String[]
+  bio         String    @default("")
+  color       String    @default("#d97706")
+  deletedAt   DateTime?
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  clips       Clip[]
+
+  @@index([workspaceId, name])
+}
+
+model Clip {
+  id              String         @id @default(uuid())
+  workspaceId     String
+  recordingId     String
+  startMs         Int
+  endMs           Int
+  title           String
+  summary         String         @default("")
+  transcript      String         @default("")
+  speakerPersonId String?
+  version         Int            @default(1)
+  deletedAt       DateTime?
+  createdById     String
+  updatedById     String
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  workspace       Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  recording       Recording      @relation(fields: [recordingId], references: [id], onDelete: Cascade)
+  speakerPerson   Person?        @relation(fields: [speakerPersonId], references: [id], onDelete: SetNull)
+  createdBy       User           @relation("ClipCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  updatedBy       User           @relation("ClipUpdatedBy", fields: [updatedById], references: [id], onDelete: Restrict)
+  blocks          ChapterBlock[]
+
+  @@index([recordingId, startMs])
+  @@index([workspaceId, updatedAt])
+  @@index([speakerPersonId])
+}
+
+model Chapter {
+  id          String        @id @default(uuid())
+  workspaceId String
+  title       String
+  intro       String        @default("")
+  status      ChapterStatus @default(DRAFT)
+  version     Int           @default(1)
+  createdById String
+  updatedAt   DateTime      @updatedAt
+  createdAt   DateTime      @default(now())
+  workspace   Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdBy   User          @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  blocks      ChapterBlock[]
+
+  @@index([workspaceId, updatedAt])
+  @@index([createdById])
+}
+
+model ChapterBlock {
+  id          String   @id @default(uuid())
+  chapterId   String
+  type        String
+  position    String
+  contentJson Json
+  clipId      String?
+  chapter     Chapter  @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+  clip        Clip?    @relation(fields: [clipId], references: [id], onDelete: SetNull)
+
+  @@index([chapterId, position])
+  @@index([clipId])
+}
+
+model CollaborationEvent {
+  id            String    @id @default(uuid())
+  workspaceId   String
+  sequence      Int       @default(autoincrement())
+  actorId       String
+  resourceType  String
+  resourceId    String
+  operation     String
+  payloadJson   Json
+  createdAt     DateTime  @default(now())
+  workspace     Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  actor         User      @relation(fields: [actorId], references: [id], onDelete: Restrict)
+
+  @@unique([workspaceId, sequence])
+  @@index([workspaceId, createdAt])
+  @@index([actorId])
+}
