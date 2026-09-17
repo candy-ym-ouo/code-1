@@ -36,6 +36,9 @@ pnpm build
 ## 主要接口
 
 - `POST /v1/auth/register`、`POST /v1/auth/login`
+- `GET /v1/me`
+- `PATCH /v1/me/profile/name`、`PATCH /v1/me/profile/email`（二次确认 + 当前密码校验，邮箱变更后返回新令牌）
+- `GET /v1/me/profile/events`（个人资料逐次变更留痕）
 - `GET/POST /v1/workspaces`
 - `POST /v1/workspaces/:id/recordings/uploads`
 - `GET /v1/recordings/:id/file`（支持 HTTP Range）

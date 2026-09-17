@@ -26,6 +26,11 @@ enum ChapterStatus {
   PUBLISHED
 }
 
+enum ProfileField {
+  DISPLAY_NAME
+  EMAIL
+}
+
 model User {
   id                String               @id @default(uuid())
   email             String               @unique
@@ -40,6 +45,7 @@ model User {
   clipsUpdated      Clip[]               @relation("ClipUpdatedBy")
   chapters          Chapter[]
   collaborationEvents CollaborationEvent[]
+  profileChanges    ProfileChangeEvent[]
 }
 
 model Workspace {
@@ -187,4 +193,20 @@ model CollaborationEvent {
   @@unique([workspaceId, sequence])
   @@index([workspaceId, createdAt])
   @@index([actorId])
+}
+
+// 个人资料修改留痕：并发提交按 sequence 逐次记录，最终值以最后一次为准。
+model ProfileChangeEvent {
+  id          String       @id @default(uuid())
+  userId      String
+  sequence    Int          @default(autoincrement())
+  field       ProfileField
+  previousValue String
+  nextValue   String
+  requestId   String
+  createdAt   DateTime     @default(now())
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, sequence])
+  @@index([userId, createdAt])
 }

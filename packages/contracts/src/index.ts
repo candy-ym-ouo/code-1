@@ -59,12 +59,35 @@ export const chapterBlockCreateSchema = z
   })
   .strict();
 
+// 个人资料修改属于敏感操作：新值必须二次输入确认，并且要验证当前密码（旧凭证）。
+const currentPasswordSchema = z.string().min(1).max(128);
+const profileDisplayNameSchema = z.string().trim().min(1).max(80);
+const profileEmailSchema = z.string().trim().email().max(254);
+
+export const profileNameUpdateSchema = z
+  .object({
+    displayName: profileDisplayNameSchema,
+    confirmName: profileDisplayNameSchema,
+    currentPassword: currentPasswordSchema,
+  })
+  .strict();
+
+export const profileEmailUpdateSchema = z
+  .object({
+    email: profileEmailSchema,
+    confirmEmail: profileEmailSchema,
+    currentPassword: currentPasswordSchema,
+  })
+  .strict();
+
 export type Role = z.infer<typeof roleSchema>;
 export type ClipInput = z.infer<typeof clipSchema>;
 export type ClipUpdateInput = z.infer<typeof clipUpdateSchema>;
 export type ChapterCreateInput = z.infer<typeof chapterCreateSchema>;
 export type ChapterUpdateInput = z.infer<typeof chapterUpdateSchema>;
 export type ChapterBlockCreateInput = z.infer<typeof chapterBlockCreateSchema>;
+export type ProfileNameUpdateInput = z.infer<typeof profileNameUpdateSchema>;
+export type ProfileEmailUpdateInput = z.infer<typeof profileEmailUpdateSchema>;
 
 export const apiError = (code: string, message: string, details?: unknown) => ({
   error: { code, message, details },

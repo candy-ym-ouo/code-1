@@ -21,6 +21,16 @@ type WorkspaceModel = {
   timezone: string;
 };
 
+type ProfileChangeEvent = {
+  id: string;
+  sequence: number;
+  field: 'DISPLAY_NAME' | 'EMAIL';
+  previousValue: string;
+  nextValue: string;
+  requestId: string;
+  createdAt: string;
+};
+
 type Recording = {
   id: string;
   title: string;
@@ -51,6 +61,7 @@ class ApiError extends Error {
   constructor(
     message: string,
     public readonly status: number,
+    public readonly code?: string,
   ) {
     super(message);
     this.name = 'ApiError';
@@ -73,10 +84,19 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   };
 
   if (!response.ok) {
-    if (response.status === 401 && !path.startsWith('/v1/auth/')) {
+    // 只有令牌缺失/过期才退出登录；修改资料时的"当前密码错误"仍停留在当前页。
+    if (
+      response.status === 401 &&
+      payload.error?.code === 'UNAUTHENTICATED' &&
+      !path.startsWith('/v1/auth/')
+    ) {
       window.dispatchEvent(new Event('history:auth-expired'));
     }
-    throw new ApiError(payload.error?.message || '请求失败，请稍后重试', response.status);
+    throw new ApiError(
+      payload.error?.message || '请求失败，请稍后重试',
+      response.status,
+      payload.error?.code,
+    );
   }
 
   if (payload.data === undefined) {
@@ -186,7 +206,314 @@ function App() {
   );
 }
 
+function ProfileModal({
+  user,
+  onClose,
+  onUpdated,
+}: {
+  user: User;
+  onClose: () => void;
+  onUpdated: (next: User, token?: string) => void;
+}) {
+  const [nameForm, setNameForm] = useState({
+    displayName: '',
+    confirmName: '',
+    currentPassword: '',
+  });
+  const [emailForm, setEmailForm] = useState({
+    email: '',
+    confirmEmail: '',
+    currentPassword: '',
+  });
+  const [savingName, setSavingName] = useState(false);
+  const [savingEmail, setSavingEmail] = useState(false);
+  const [nameError, setNameError] = useState('');
+  const [emailError, setEmailError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [events, setEvents] = useState<ProfileChangeEvent[]>([]);
+  const [eventsLoading, setEventsLoading] = useState(true);
+  const [eventsError, setEventsError] = useState('');
+
+  const loadEvents = useCallback(async () => {
+    const rows = await api<ProfileChangeEvent[]>('/v1/me/profile/events?limit=50');
+    setEvents(rows);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadEvents()
+      .catch((error) => {
+        if (!cancelled) setEventsError((error as Error).message);
+      })
+      .finally(() => {
+        if (!cancelled) setEventsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [loadEvents]);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  const submitName = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const displayName = nameForm.displayName.trim();
+    const confirmName = nameForm.confirmName.trim();
+    setNameError('');
+    setNotice('');
+    if (!displayName) {
+      setNameError('请输入新姓名');
+      return;
+    }
+    if (displayName !== confirmName) {
+      setNameError('两次输入的姓名不一致，请重新确认');
+      return;
+    }
+    if (displayName === user.displayName) {
+      setNameError('新姓名与当前姓名一致，无需修改');
+      return;
+    }
+    if (!nameForm.currentPassword) {
+      setNameError('请输入当前密码以验证身份');
+      return;
+    }
+
+    setSavingName(true);
+    try {
+      const result = await api<{ user: User }>('/v1/me/profile/name', {
+        method: 'PATCH',
+        body: JSON.stringify({
+          displayName,
+          confirmName,
+          currentPassword: nameForm.currentPassword,
+        }),
+      });
+      onUpdated(result.user);
+      setNameForm({ displayName: '', confirmName: '', currentPassword: '' });
+      setNotice('姓名已更新');
+      await loadEvents();
+    } catch (error) {
+      setNameError((error as Error).message);
+    } finally {
+      setSavingName(false);
+    }
+  };
+
+  const submitEmail = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const email = emailForm.email.trim();
+    const confirmEmail = emailForm.confirmEmail.trim();
+    setEmailError('');
+    setNotice('');
+    if (!email) {
+      setEmailError('请输入新邮箱');
+      return;
+    }
+    if (email.toLowerCase() !== confirmEmail.toLowerCase()) {
+      setEmailError('两次输入的邮箱不一致，请重新确认');
+      return;
+    }
+    if (email.toLowerCase() === user.email.toLowerCase()) {
+      setEmailError('新邮箱与当前邮箱一致，无需修改');
+      return;
+    }
+    if (!emailForm.currentPassword) {
+      setEmailError('请输入当前密码以验证身份');
+      return;
+    }
+
+    setSavingEmail(true);
+    try {
+      const result = await api<{ user: User; token: string }>('/v1/me/profile/email', {
+        method: 'PATCH',
+        body: JSON.stringify({
+          email,
+          confirmEmail,
+          currentPassword: emailForm.currentPassword,
+        }),
+      });
+      onUpdated(result.user, result.token);
+      setEmailForm({ email: '', confirmEmail: '', currentPassword: '' });
+      setNotice('邮箱已更新，登录凭证已同步刷新');
+      await loadEvents();
+    } catch (error) {
+      setEmailError((error as Error).message);
+    } finally {
+      setSavingEmail(false);
+    }
+  };
+
+  const busy = savingName || savingEmail;
+
+  return (
+    <div className="profile-modal" role="presentation" onMouseDown={onClose}>
+      <div
+        className="profile-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label="个人资料"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="profile-head">
+          <div>
+            <span className="eyebrow">个人资料</span>
+            <h2>{user.displayName}</h2>
+            <small>{user.email}</small>
+          </div>
+          <button type="button" className="icon" aria-label="关闭" onClick={onClose}>
+            ✕
+          </button>
+        </div>
+
+        {notice && <div className="success">{notice}</div>}
+
+        <div className="profile-grid">
+          <form className="profile-card" onSubmit={submitName}>
+            <div className="form-title">修改姓名</div>
+            <label>
+              新姓名
+              <input
+                value={nameForm.displayName}
+                onChange={(event) =>
+                  setNameForm((current) => ({
+                    ...current,
+                    displayName: event.target.value,
+                  }))
+                }
+                maxLength={80}
+                autoComplete="off"
+                disabled={busy}
+              />
+            </label>
+            <label>
+              确认新姓名（再次输入）
+              <input
+                value={nameForm.confirmName}
+                onChange={(event) =>
+                  setNameForm((current) => ({
+                    ...current,
+                    confirmName: event.target.value,
+                  }))
+                }
+                maxLength={80}
+                autoComplete="off"
+                disabled={busy}
+              />
+            </label>
+            <label>
+              当前密码
+              <input
+                type="password"
+                value={nameForm.currentPassword}
+                onChange={(event) =>
+                  setNameForm((current) => ({
+                    ...current,
+                    currentPassword: event.target.value,
+                  }))
+                }
+                autoComplete="current-password"
+                disabled={busy}
+              />
+            </label>
+            {nameError && <div className="error">{nameError}</div>}
+            <button type="submit" disabled={busy}>
+              {savingName ? '提交中...' : '保存姓名'}
+            </button>
+          </form>
+
+          <form className="profile-card" onSubmit={submitEmail}>
+            <div className="form-title">变更邮箱</div>
+            <label>
+              新邮箱
+              <input
+                type="email"
+                value={emailForm.email}
+                onChange={(event) =>
+                  setEmailForm((current) => ({ ...current, email: event.target.value }))
+                }
+                maxLength={254}
+                autoComplete="email"
+                disabled={busy}
+              />
+            </label>
+            <label>
+              确认新邮箱（再次输入）
+              <input
+                type="email"
+                value={emailForm.confirmEmail}
+                onChange={(event) =>
+                  setEmailForm((current) => ({
+                    ...current,
+                    confirmEmail: event.target.value,
+                  }))
+                }
+                maxLength={254}
+                autoComplete="email"
+                disabled={busy}
+              />
+            </label>
+            <label>
+              当前密码
+              <input
+                type="password"
+                value={emailForm.currentPassword}
+                onChange={(event) =>
+                  setEmailForm((current) => ({
+                    ...current,
+                    currentPassword: event.target.value,
+                  }))
+                }
+                autoComplete="current-password"
+                disabled={busy}
+              />
+            </label>
+            {emailError && <div className="error">{emailError}</div>}
+            <button type="submit" disabled={busy}>
+              {savingEmail ? '提交中...' : '保存邮箱'}
+            </button>
+          </form>
+        </div>
+
+        <div className="profile-history">
+          <div className="section-title">
+            变更记录 <span>逐次留痕，最近 50 条</span>
+          </div>
+          {eventsLoading && <p className="empty" style={{ padding: 16 }}>正在加载变更记录...</p>}
+          {eventsError && <div className="error" style={{ margin: 12 }}>{eventsError}</div>}
+          {!eventsLoading && !eventsError && !events.length && (
+            <p className="empty" style={{ padding: 16 }}>还没有资料变更记录。</p>
+          )}
+          {events.map((event) => (
+            <div className="event-row" key={event.id}>
+              <span className={`event-tag ${event.field === 'EMAIL' ? 'email' : 'name'}`}>
+                {event.field === 'EMAIL' ? '邮箱' : '姓名'}
+              </span>
+              <div>
+                <b>
+                  {event.previousValue} → {event.nextValue}
+                </b>
+                <small>
+                  #{event.sequence} · {new Date(event.createdAt).toLocaleString()} ·
+                  请求 {event.requestId.slice(0, 8)}
+                </small>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Workspace({ onLogout }: { onLogout: () => void }) {
+  const [me, setMe] = useState<User | null>(null);
+  const [profileOpen, setProfileOpen] = useState(false);
   const [workspace, setWorkspace] = useState<WorkspaceModel | null>(null);
   const [recordings, setRecordings] = useState<Recording[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -214,7 +541,11 @@ function Workspace({ onLogout }: { onLogout: () => void }) {
       setLoading(true);
       setError('');
       try {
-        let workspaces = await api<WorkspaceModel[]>('/v1/workspaces');
+        const [currentUser, initialWorkspaces] = await Promise.all([
+          api<User>('/v1/me'),
+          api<WorkspaceModel[]>('/v1/workspaces'),
+        ]);
+        let workspaces = initialWorkspaces;
         if (workspaces.length === 0) {
           const created = await api<WorkspaceModel>('/v1/workspaces', {
             method: 'POST',
@@ -228,6 +559,7 @@ function Workspace({ onLogout }: { onLogout: () => void }) {
           `/v1/workspaces/${current.id}/recordings`,
         );
         if (cancelled) return;
+        setMe(currentUser);
         setWorkspace(current);
         setRecordings(rows);
       } catch (loadError) {
@@ -306,6 +638,11 @@ function Workspace({ onLogout }: { onLogout: () => void }) {
     }
   };
 
+  const handleProfileUpdated = (next: User, nextToken?: string) => {
+    setMe(next);
+    if (nextToken) localStorage.setItem('token', nextToken);
+  };
+
   return (
     <div className="shell">
       <header>
@@ -314,6 +651,14 @@ function Workspace({ onLogout }: { onLogout: () => void }) {
           <strong>{workspace?.name || '口述家史'}</strong>
         </div>
         <nav>
+          <button
+            type="button"
+            className="ghost"
+            disabled={!me}
+            onClick={() => setProfileOpen(true)}
+          >
+            个人资料
+          </button>
           <button className="ghost" onClick={onLogout}>
             退出
           </button>
@@ -382,6 +727,14 @@ function Workspace({ onLogout }: { onLogout: () => void }) {
           )}
         </section>
       </div>
+
+      {profileOpen && me && (
+        <ProfileModal
+          user={me}
+          onClose={() => setProfileOpen(false)}
+          onUpdated={handleProfileUpdated}
+        />
+      )}
     </div>
   );
 }

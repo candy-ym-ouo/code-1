@@ -424,6 +424,145 @@ audio {
   border: 0;
 }
 
+nav {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.success {
+  padding: 10px;
+  background: #ecfdf5;
+  color: #047857;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.profile-modal {
+  position: fixed;
+  inset: 0;
+  background: #29252466;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  z-index: 50;
+  overflow-y: auto;
+}
+
+.profile-dialog {
+  width: min(860px, 100%);
+  background: #fff;
+  border: 1px solid #e7e2d8;
+  border-radius: 12px;
+  box-shadow: 0 24px 70px #29252426;
+  padding: 26px;
+}
+
+.profile-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.profile-head small {
+  color: #78716c;
+}
+
+.profile-head .icon {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: #f4f1eb;
+  color: #78716c;
+}
+
+.profile-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin: 18px 0;
+}
+
+.profile-card {
+  border: 1px solid #e7e2d8;
+  border-radius: 8px;
+  padding: 18px;
+  background: #fbfaf8;
+}
+
+.profile-card label {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  color: #57534e;
+  margin: 12px 0;
+}
+
+.profile-card input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #d6d3d1;
+  border-radius: 6px;
+  padding: 10px 12px;
+  background: #fff;
+}
+
+.profile-card button {
+  width: 100%;
+  padding: 11px 14px;
+  border-radius: 6px;
+  background: #b45309;
+  color: #fff;
+  font-weight: 700;
+  margin-top: 2px;
+}
+
+.profile-card .error {
+  margin: 8px 0;
+}
+
+.profile-history {
+  border: 1px solid #e7e2d8;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.profile-history .section-title span {
+  color: #a8a29e;
+  font-weight: 400;
+  font-size: 12px;
+  margin-left: 8px;
+}
+
+.event-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 16px;
+  border-bottom: 1px solid #f1efeb;
+}
+
+.event-row:last-child {
+  border: 0;
+}
+
+.event-tag {
+  flex: none;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.event-tag.email {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
 @media (max-width: 1050px) {
   .clip-form {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -436,6 +575,12 @@ audio {
 
   .clip-form button {
     width: 100%;
+  }
+}
+
+@media (max-width: 720px) {
+  .profile-grid {
+    grid-template-columns: 1fr;
   }
 }
 

@@ -4,7 +4,7 @@ import cookie from '@fastify/cookie';
 import jwt from '@fastify/jwt';
 import multipart from '@fastify/multipart';
 import websocket from '@fastify/websocket';
-import { Prisma, PrismaClient, Role } from '@prisma/client';
+import { Prisma, PrismaClient, ProfileField, Role } from '@prisma/client';
 import argon2 from 'argon2';
 import { createReadStream } from 'node:fs';
 import { createWriteStream } from 'node:fs';
@@ -22,6 +22,8 @@ import {
   chapterUpdateSchema,
   clipSchema,
   clipUpdateSchema,
+  profileEmailUpdateSchema,
+  profileNameUpdateSchema,
 } from '@history/contracts';
 
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024;
@@ -351,6 +353,202 @@ app.get('/v1/me', { preHandler: authenticate }, async (req) => ({
     select: { id: true, email: true, displayName: true },
   }),
 }));
+
+const PROFILE_EVENT_PAGE_SIZE = 100;
+
+function profileEventDto(event: {
+  id: string;
+  sequence: number;
+  field: ProfileField;
+  previousValue: string;
+  nextValue: string;
+  requestId: string;
+  createdAt: Date;
+}) {
+  return {
+    id: event.id,
+    sequence: event.sequence,
+    field: event.field,
+    previousValue: event.previousValue,
+    nextValue: event.nextValue,
+    requestId: event.requestId,
+    createdAt: event.createdAt.toISOString(),
+  };
+}
+
+/**
+ * 个人资料敏感修改：
+ * - 调用前必须用 argon2 校验当前密码（旧凭证）；
+ * - 事务内先对用户行加 FOR UPDATE 行锁，把并发提交串行化；
+ * - 每次提交都写一条 ProfileChangeEvent（逐次留痕），最终值以最后一次提交为准
+ *   （last-write-wins，不使用乐观锁版本冲突）。
+ */
+async function applyProfileChange<T>(params: {
+  req: FastifyRequest;
+  field: ProfileField;
+  column: 'displayName' | 'email';
+  nextValue: string;
+  currentValue: string;
+  buildResult: (user: { id: string; email: string; displayName: string }) => T;
+}): Promise<T> {
+  const { req, field, column, nextValue, currentValue, buildResult } = params;
+  const userId = authUser(req).id;
+
+  // 与当前值相同：没有任何变更，不产生留痕。
+  if (nextValue === currentValue) {
+    throw new HttpError(400, 'PROFILE_UNCHANGED', '新值与当前资料一致，无需修改');
+  }
+
+  try {
+    return await prisma.$transaction(async (tx) => {
+      // FOR UPDATE 锁定本行：并发请求在此排队，依次读到前一次提交后的最新值。
+      const locked = await tx.$queryRaw<{ id: string }[]>`
+        SELECT id FROM "User" WHERE id = ${userId} FOR UPDATE
+      `;
+      if (locked.length === 0) {
+        throw new HttpError(404, 'NOT_FOUND', '用户不存在');
+      }
+
+      const current = await tx.user.findUniqueOrThrow({
+        where: { id: userId },
+        select: { displayName: true, email: true },
+      });
+      const previousValue = current[column];
+
+      // 并发场景下前面的请求可能已经把值改成了相同值：跳过更新，但本次提交仍然留痕。
+      if (previousValue !== nextValue) {
+        await tx.user.update({
+          where: { id: userId },
+          data: { [column]: nextValue },
+        });
+      }
+
+      await tx.profileChangeEvent.create({
+        data: {
+          userId,
+          field,
+          previousValue,
+          nextValue,
+          requestId: req.id,
+        },
+      });
+
+      const user = await tx.user.findUniqueOrThrow({
+        where: { id: userId },
+        select: { id: true, email: true, displayName: true },
+      });
+      return buildResult(user);
+    });
+  } catch (error) {
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === 'P2002'
+    ) {
+      // 邮箱唯一约束冲突：由调用方翻译成语义化错误码。
+      throw new HttpError(
+        409,
+        field === ProfileField.EMAIL ? 'EMAIL_EXISTS' : 'CONFLICT',
+        field === ProfileField.EMAIL ? '邮箱已注册' : '数据冲突',
+      );
+    }
+    throw error;
+  }
+}
+
+app.patch('/v1/me/profile/name', { preHandler: authenticate }, async (req) => {
+  const body = validationError(profileNameUpdateSchema, req.body);
+  const user = authUser(req);
+
+  // 二次确认：两次输入的新姓名必须一致。
+  if (body.confirmName !== body.displayName) {
+    throw new HttpError(400, 'NAME_CONFIRM_MISMATCH', '两次输入的姓名不一致');
+  }
+
+  const current = await prisma.user.findUnique({
+    where: { id: user.id },
+    select: { passwordHash: true, displayName: true },
+  });
+  if (!current) throw new HttpError(404, 'NOT_FOUND', '用户不存在');
+
+  // 旧凭证校验：修改姓名也必须提供当前密码。
+  if (!(await argon2.verify(current.passwordHash, body.currentPassword))) {
+    throw new HttpError(401, 'INVALID_CREDENTIALS', '当前密码错误');
+  }
+
+  const updated = await applyProfileChange({
+    req,
+    field: ProfileField.DISPLAY_NAME,
+    column: 'displayName',
+    nextValue: body.displayName,
+    currentValue: current.displayName,
+    buildResult: (profile) => profile,
+  });
+
+  return { data: { user: updated } };
+});
+
+app.patch('/v1/me/profile/email', { preHandler: authenticate }, async (req, reply) => {
+  const body = validationError(profileEmailUpdateSchema, req.body);
+  const user = authUser(req);
+
+  const nextEmail = body.email.toLowerCase();
+  const confirmEmail = body.confirmEmail.toLowerCase();
+
+  // 二次确认：两次输入的新邮箱必须一致。
+  if (confirmEmail !== nextEmail) {
+    throw new HttpError(400, 'EMAIL_CONFIRM_MISMATCH', '两次输入的邮箱不一致');
+  }
+
+  const current = await prisma.user.findUnique({
+    where: { id: user.id },
+    select: { passwordHash: true, email: true },
+  });
+  if (!current) throw new HttpError(404, 'NOT_FOUND', '用户不存在');
+
+  // 旧凭证校验：邮箱变更必须验证当前密码。
+  if (!(await argon2.verify(current.passwordHash, body.currentPassword))) {
+    throw new HttpError(401, 'INVALID_CREDENTIALS', '当前密码错误');
+  }
+
+  const updated = await applyProfileChange({
+    req,
+    field: ProfileField.EMAIL,
+    column: 'email',
+    nextValue: nextEmail,
+    currentValue: current.email,
+    buildResult: (profile) => profile,
+  });
+
+  // 邮箱是 JWT 的组成部分，变更后重新签发令牌，旧令牌不再代表当前资料。
+  const token = await app.jwt.sign(
+    { id: updated.id, email: updated.email },
+    { expiresIn: '2h' },
+  );
+  return reply.send({ data: { user: updated, token } });
+});
+
+app.get('/v1/me/profile/events', { preHandler: authenticate }, async (req) => {
+  const query = validationError(
+    z
+      .object({
+        afterSequence: z.coerce.number().int().nonnegative().optional(),
+        limit: z.coerce.number().int().min(1).max(PROFILE_EVENT_PAGE_SIZE).optional(),
+      })
+      .strict(),
+    req.query,
+  );
+  const events = await prisma.profileChangeEvent.findMany({
+    where: {
+      userId: authUser(req).id,
+      ...(query.afterSequence !== undefined
+        ? { sequence: { gt: query.afterSequence } }
+        : {}),
+    },
+    orderBy: { sequence: 'desc' },
+    take: query.limit ?? 50,
+  });
+  return { data: events.map(profileEventDto) };
+});
 
 app.post('/v1/workspaces', { preHandler: authenticate }, async (req, reply) => {
   const body = validationError(workspaceCreateSchema, req.body);
