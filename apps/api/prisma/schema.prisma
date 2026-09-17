@@ -40,6 +40,36 @@ model User {
   clipsUpdated      Clip[]               @relation("ClipUpdatedBy")
   chapters          Chapter[]
   collaborationEvents CollaborationEvent[]
+  emailChangeRequests EmailChangeRequest[]
+  profileChangeLogs ProfileChangeLog[]
+}
+
+model EmailChangeRequest {
+  id           String    @id @default(uuid())
+  userId       String
+  newEmail     String
+  tokenHash    String    @unique
+  expiresAt    DateTime
+  consumedAt   DateTime?
+  supersededAt DateTime?
+  createdAt    DateTime  @default(now())
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+model ProfileChangeLog {
+  id        String   @id @default(uuid())
+  userId    String
+  sequence  Int      @default(autoincrement())
+  field     String
+  oldValue  String
+  newValue  String
+  requestId String?
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
 }
 
 model Workspace {

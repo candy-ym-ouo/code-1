@@ -47,6 +47,21 @@ type ApiErrorPayload = {
   };
 };
 
+type ProfileChange = {
+  id: string;
+  field: string;
+  oldValue: string;
+  newValue: string;
+  createdAt: string;
+};
+
+type EmailChangeRequestResult = {
+  requestId: string;
+  newEmail: string;
+  expiresAt: string;
+  confirmationToken: string;
+};
+
 class ApiError extends Error {
   constructor(
     message: string,
@@ -194,6 +209,7 @@ function Workspace({ onLogout }: { onLogout: () => void }) {
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [profileOpen, setProfileOpen] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
 
   const selected = useMemo(
@@ -314,11 +330,16 @@ function Workspace({ onLogout }: { onLogout: () => void }) {
           <strong>{workspace?.name || '口述家史'}</strong>
         </div>
         <nav>
+          <button className="ghost" onClick={() => setProfileOpen(true)}>
+            个人资料
+          </button>
           <button className="ghost" onClick={onLogout}>
             退出
           </button>
         </nav>
       </header>
+
+      {profileOpen && <ProfilePanel onClose={() => setProfileOpen(false)} />}
 
       <div className="layout">
         <aside>
@@ -381,6 +402,235 @@ function Workspace({ onLogout }: { onLogout: () => void }) {
             </div>
           )}
         </section>
+      </div>
+    </div>
+  );
+}
+
+function ProfilePanel({ onClose }: { onClose: () => void }) {
+  const [me, setMe] = useState<User | null>(null);
+  const [changes, setChanges] = useState<ProfileChange[]>([]);
+  const [loadError, setLoadError] = useState('');
+
+  const [displayName, setDisplayName] = useState('');
+  const [namePassword, setNamePassword] = useState('');
+  const [nameBusy, setNameBusy] = useState(false);
+  const [nameError, setNameError] = useState('');
+  const [nameSaved, setNameSaved] = useState(false);
+
+  const [newEmail, setNewEmail] = useState('');
+  const [emailPassword, setEmailPassword] = useState('');
+  const [emailBusy, setEmailBusy] = useState(false);
+  const [emailError, setEmailError] = useState('');
+  const [pending, setPending] = useState<EmailChangeRequestResult | null>(null);
+  const [confirmToken, setConfirmToken] = useState('');
+  const [confirmBusy, setConfirmBusy] = useState(false);
+  const [confirmError, setConfirmError] = useState('');
+
+  const reload = useCallback(async () => {
+    const [account, history] = await Promise.all([
+      api<User>('/v1/me'),
+      api<ProfileChange[]>('/v1/me/changes'),
+    ]);
+    setMe(account);
+    setChanges(history);
+    setDisplayName(account.displayName);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    reload().catch((fetchError) => {
+      if (!cancelled) setLoadError((fetchError as Error).message);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [reload]);
+
+  const submitName = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setNameBusy(true);
+    setNameError('');
+    setNameSaved(false);
+    try {
+      await api<User>('/v1/me/profile', {
+        method: 'PATCH',
+        body: JSON.stringify({
+          displayName: displayName.trim(),
+          currentPassword: namePassword,
+        }),
+      });
+      setNamePassword('');
+      setNameSaved(true);
+      await reload();
+    } catch (saveError) {
+      setNameError((saveError as Error).message);
+    } finally {
+      setNameBusy(false);
+    }
+  };
+
+  const requestEmailChange = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setEmailBusy(true);
+    setEmailError('');
+    try {
+      const result = await api<EmailChangeRequestResult>('/v1/me/email/request', {
+        method: 'POST',
+        body: JSON.stringify({
+          newEmail: newEmail.trim(),
+          currentPassword: emailPassword,
+        }),
+      });
+      setPending(result);
+      setConfirmToken(result.confirmationToken);
+      setEmailPassword('');
+    } catch (requestError) {
+      setEmailError((requestError as Error).message);
+    } finally {
+      setEmailBusy(false);
+    }
+  };
+
+  const confirmEmailChange = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!pending) return;
+    setConfirmBusy(true);
+    setConfirmError('');
+    try {
+      await api<User>('/v1/me/email/confirm', {
+        method: 'POST',
+        body: JSON.stringify({ requestId: pending.requestId, token: confirmToken.trim() }),
+      });
+      setPending(null);
+      setNewEmail('');
+      setConfirmToken('');
+      await reload();
+    } catch (confirmFailure) {
+      setConfirmError((confirmFailure as Error).message);
+    } finally {
+      setConfirmBusy(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal profile" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-head">
+          <h2>个人资料</h2>
+          <button type="button" className="ghost" onClick={onClose}>
+            关闭
+          </button>
+        </div>
+        {loadError && <div className="error">{loadError}</div>}
+        {me && (
+          <>
+            <p className="muted">当前邮箱：{me.email}</p>
+
+            <form className="profile-section" onSubmit={submitName}>
+              <h3>修改姓名</h3>
+              <label>
+                姓名
+                <input
+                  value={displayName}
+                  onChange={(event) => setDisplayName(event.target.value)}
+                  maxLength={80}
+                  required
+                />
+              </label>
+              <label>
+                当前密码
+                <input
+                  type="password"
+                  value={namePassword}
+                  onChange={(event) => setNamePassword(event.target.value)}
+                  autoComplete="current-password"
+                  required
+                />
+              </label>
+              {nameError && <div className="error">{nameError}</div>}
+              {nameSaved && <div className="ok">姓名已更新</div>}
+              <button disabled={nameBusy}>{nameBusy ? '保存中...' : '保存姓名'}</button>
+            </form>
+
+            <div className="profile-section">
+              <h3>变更邮箱</h3>
+              {!pending ? (
+                <form onSubmit={requestEmailChange}>
+                  <label>
+                    新邮箱
+                    <input
+                      type="email"
+                      value={newEmail}
+                      onChange={(event) => setNewEmail(event.target.value)}
+                      autoComplete="email"
+                      required
+                    />
+                  </label>
+                  <label>
+                    当前密码
+                    <input
+                      type="password"
+                      value={emailPassword}
+                      onChange={(event) => setEmailPassword(event.target.value)}
+                      autoComplete="current-password"
+                      required
+                    />
+                  </label>
+                  {emailError && <div className="error">{emailError}</div>}
+                  <button disabled={emailBusy}>
+                    {emailBusy ? '提交中...' : '获取确认令牌'}
+                  </button>
+                </form>
+              ) : (
+                <form onSubmit={confirmEmailChange}>
+                  <p className="hint">
+                    确认令牌已签发（30 分钟内有效），确认后登录邮箱将变更为{' '}
+                    {pending.newEmail}。开发环境未接入邮件服务，令牌已自动填入。
+                  </p>
+                  <label>
+                    确认令牌
+                    <input
+                      value={confirmToken}
+                      onChange={(event) => setConfirmToken(event.target.value)}
+                      required
+                    />
+                  </label>
+                  {confirmError && <div className="error">{confirmError}</div>}
+                  <button disabled={confirmBusy}>
+                    {confirmBusy ? '确认中...' : '确认变更'}
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost"
+                    disabled={confirmBusy}
+                    onClick={() => {
+                      setPending(null);
+                      setConfirmToken('');
+                      setConfirmError('');
+                    }}
+                  >
+                    取消本次变更
+                  </button>
+                </form>
+              )}
+            </div>
+
+            <div className="profile-section">
+              <h3>变更记录</h3>
+              {changes.length === 0 && <p className="empty">暂无变更记录。</p>}
+              {changes.map((change) => (
+                <div className="change-row" key={change.id}>
+                  <span>
+                    {change.field === 'displayName' ? '姓名' : '邮箱'}：{change.oldValue} →{' '}
+                    {change.newValue}
+                  </span>
+                  <small>{new Date(change.createdAt).toLocaleString()}</small>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

@@ -22,11 +22,16 @@ import {
   chapterUpdateSchema,
   clipSchema,
   clipUpdateSchema,
+  emailChangeConfirmSchema,
+  emailChangeRequestSchema,
+  profileUpdateSchema,
 } from '@history/contracts';
 
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024;
 const ALLOWED_AUDIO_EXTENSIONS = /\.(aac|aiff|flac|m4a|mp3|mp4|oga|ogg|opus|wav|webm)$/i;
 const DEFAULT_JWT_SECRET = 'development-secret-change-me-development';
+const EMAIL_CHANGE_TTL_MS = 30 * 60 * 1000;
+const PROFILE_LOCK_NAMESPACE = 'user-profile';
 
 class HttpError extends Error {
   constructor(
@@ -168,6 +173,25 @@ async function recordEvent(
       payloadJson: payload as Prisma.InputJsonValue,
     },
   });
+}
+
+async function verifyCurrentPassword(
+  userId: string,
+  currentPassword: string,
+): Promise<boolean> {
+  const account = await prisma.user.findUnique({ where: { id: userId } });
+  if (!account) return false;
+  return argon2.verify(account.passwordHash, currentPassword);
+}
+
+// 串行化同一用户的资料变更：并发提交在事务内按到达顺序依次生效，
+// 最终只保留最后一次提交的值，每次提交各自写入一条 ProfileChangeLog。
+async function lockUserProfile(tx: Prisma.TransactionClient, userId: string): Promise<void> {
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${PROFILE_LOCK_NAMESPACE}), hashtext(${userId}))`;
+}
+
+function hashEmailChangeToken(token: string): Buffer {
+  return crypto.createHash('sha256').update(token).digest();
 }
 
 function recordingDto<T extends { sizeBytes: bigint }>(recording: T) {
@@ -349,6 +373,180 @@ app.get('/v1/me', { preHandler: authenticate }, async (req) => ({
   data: await prisma.user.findUnique({
     where: { id: authUser(req).id },
     select: { id: true, email: true, displayName: true },
+  }),
+}));
+
+app.patch('/v1/me/profile', { preHandler: authenticate }, async (req, reply) => {
+  const body = validationError(profileUpdateSchema, req.body);
+  const user = authUser(req);
+
+  if (!(await verifyCurrentPassword(user.id, body.currentPassword))) {
+    return reply.code(403).send({
+      error: { code: 'INVALID_CREDENTIALS', message: '当前密码不正确' },
+    });
+  }
+
+  const updated = await prisma.$transaction(async (tx) => {
+    await lockUserProfile(tx, user.id);
+    const fresh = await tx.user.findUniqueOrThrow({ where: { id: user.id } });
+    const next = await tx.user.update({
+      where: { id: user.id },
+      data: { displayName: body.displayName },
+      select: { id: true, email: true, displayName: true },
+    });
+    await tx.profileChangeLog.create({
+      data: {
+        userId: user.id,
+        field: 'displayName',
+        oldValue: fresh.displayName,
+        newValue: body.displayName,
+        requestId: req.id,
+      },
+    });
+    return next;
+  });
+
+  return { data: updated };
+});
+
+app.post('/v1/me/email/request', { preHandler: authenticate }, async (req, reply) => {
+  const body = validationError(emailChangeRequestSchema, req.body);
+  const user = authUser(req);
+
+  const account = await prisma.user.findUnique({ where: { id: user.id } });
+  if (!account || !(await argon2.verify(account.passwordHash, body.currentPassword))) {
+    return reply.code(403).send({
+      error: { code: 'INVALID_CREDENTIALS', message: '当前密码不正确' },
+    });
+  }
+
+  const newEmail = body.newEmail.toLowerCase();
+  if (newEmail === account.email) {
+    throw new HttpError(400, 'EMAIL_UNCHANGED', '新邮箱与当前邮箱相同');
+  }
+  if (await prisma.user.findUnique({ where: { email: newEmail } })) {
+    return reply.code(409).send({
+      error: { code: 'EMAIL_EXISTS', message: '邮箱已被其他账户使用' },
+    });
+  }
+
+  const token = crypto.randomBytes(32).toString('hex');
+  const expiresAt = new Date(Date.now() + EMAIL_CHANGE_TTL_MS);
+  const changeRequest = await prisma.$transaction(async (tx) => {
+    await lockUserProfile(tx, user.id);
+    // 只保留最新一次申请：之前的待确认申请全部作废
+    await tx.emailChangeRequest.updateMany({
+      where: { userId: user.id, consumedAt: null, supersededAt: null },
+      data: { supersededAt: new Date() },
+    });
+    return tx.emailChangeRequest.create({
+      data: {
+        userId: user.id,
+        newEmail,
+        tokenHash: hashEmailChangeToken(token).toString('hex'),
+        expiresAt,
+      },
+    });
+  });
+
+  // 生产环境应通过邮件把确认令牌发给新邮箱；当前未接入邮件服务，先随响应返回
+  return reply.code(201).send({
+    data: {
+      requestId: changeRequest.id,
+      newEmail: changeRequest.newEmail,
+      expiresAt: changeRequest.expiresAt,
+      confirmationToken: token,
+    },
+  });
+});
+
+app.post('/v1/me/email/confirm', { preHandler: authenticate }, async (req, reply) => {
+  const body = validationError(emailChangeConfirmSchema, req.body);
+  const user = authUser(req);
+
+  const changeRequest = await prisma.emailChangeRequest.findUnique({
+    where: { id: body.requestId },
+  });
+  const providedHash = hashEmailChangeToken(body.token);
+  const expectedHash = changeRequest ? Buffer.from(changeRequest.tokenHash, 'hex') : null;
+  const tokenMatches =
+    expectedHash !== null &&
+    expectedHash.length === providedHash.length &&
+    crypto.timingSafeEqual(providedHash, expectedHash);
+  if (!changeRequest || changeRequest.userId !== user.id || !tokenMatches) {
+    return reply.code(400).send({
+      error: { code: 'INVALID_CONFIRMATION', message: '确认信息无效' },
+    });
+  }
+  if (changeRequest.consumedAt || changeRequest.supersededAt) {
+    return reply.code(409).send({
+      error: { code: 'EMAIL_CHANGE_STALE', message: '该申请已失效，请重新发起' },
+    });
+  }
+  if (changeRequest.expiresAt <= new Date()) {
+    return reply.code(410).send({
+      error: { code: 'EMAIL_CHANGE_EXPIRED', message: '确认令牌已过期，请重新发起' },
+    });
+  }
+
+  try {
+    const updated = await prisma.$transaction(async (tx) => {
+      await lockUserProfile(tx, user.id);
+      // 在串行区内重新校验申请仍然有效，避免并发确认或更新的申请导致错乱
+      const fresh = await tx.emailChangeRequest.findUnique({ where: { id: changeRequest.id } });
+      if (!fresh || fresh.consumedAt || fresh.supersededAt || fresh.expiresAt <= new Date()) {
+        return null;
+      }
+      if (await tx.user.findUnique({ where: { email: fresh.newEmail } })) {
+        throw new HttpError(409, 'EMAIL_EXISTS', '邮箱已被其他账户使用');
+      }
+      const current = await tx.user.findUniqueOrThrow({ where: { id: user.id } });
+      const next = await tx.user.update({
+        where: { id: user.id },
+        data: { email: fresh.newEmail },
+        select: { id: true, email: true, displayName: true },
+      });
+      await tx.emailChangeRequest.update({
+        where: { id: fresh.id },
+        data: { consumedAt: new Date() },
+      });
+      await tx.profileChangeLog.create({
+        data: {
+          userId: user.id,
+          field: 'email',
+          oldValue: current.email,
+          newValue: fresh.newEmail,
+          requestId: req.id,
+        },
+      });
+      return next;
+    });
+
+    if (!updated) {
+      return reply.code(409).send({
+        error: { code: 'EMAIL_CHANGE_STALE', message: '该申请已失效，请重新发起' },
+      });
+    }
+    return { data: updated };
+  } catch (error) {
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === 'P2002'
+    ) {
+      return reply.code(409).send({
+        error: { code: 'EMAIL_EXISTS', message: '邮箱已被其他账户使用' },
+      });
+    }
+    throw error;
+  }
+});
+
+app.get('/v1/me/changes', { preHandler: authenticate }, async (req) => ({
+  data: await prisma.profileChangeLog.findMany({
+    where: { userId: authUser(req).id },
+    orderBy: { sequence: 'desc' },
+    take: 100,
+    select: { id: true, field: true, oldValue: true, newValue: true, createdAt: true },
   }),
 }));
 

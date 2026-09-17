@@ -36,6 +36,10 @@ pnpm build
 ## 主要接口
 
 - `POST /v1/auth/register`、`POST /v1/auth/login`
+- `GET /v1/me`
+- `PATCH /v1/me/profile`（修改姓名，需校验当前密码）
+- `POST /v1/me/email/request`、`POST /v1/me/email/confirm`（邮箱变更二次确认，需校验当前密码；确认令牌 30 分钟内有效，开发环境未接入邮件服务，令牌随 request 响应返回）
+- `GET /v1/me/changes`（个人资料变更留痕；同一用户的并发变更在事务内串行生效，只保留最终值，每次提交各记录一条）
 - `GET/POST /v1/workspaces`
 - `POST /v1/workspaces/:id/recordings/uploads`
 - `GET /v1/recordings/:id/file`（支持 HTTP Range）

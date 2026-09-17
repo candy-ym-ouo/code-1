@@ -59,12 +59,38 @@ export const chapterBlockCreateSchema = z
   })
   .strict();
 
+const currentPasswordSchema = z.string().min(1).max(128);
+
+export const profileUpdateSchema = z
+  .object({
+    displayName: z.string().trim().min(1).max(80),
+    currentPassword: currentPasswordSchema,
+  })
+  .strict();
+
+export const emailChangeRequestSchema = z
+  .object({
+    newEmail: z.string().trim().email().max(254),
+    currentPassword: currentPasswordSchema,
+  })
+  .strict();
+
+export const emailChangeConfirmSchema = z
+  .object({
+    requestId: z.string().uuid(),
+    token: z.string().trim().min(1).max(128),
+  })
+  .strict();
+
 export type Role = z.infer<typeof roleSchema>;
 export type ClipInput = z.infer<typeof clipSchema>;
 export type ClipUpdateInput = z.infer<typeof clipUpdateSchema>;
 export type ChapterCreateInput = z.infer<typeof chapterCreateSchema>;
 export type ChapterUpdateInput = z.infer<typeof chapterUpdateSchema>;
 export type ChapterBlockCreateInput = z.infer<typeof chapterBlockCreateSchema>;
+export type ProfileUpdateInput = z.infer<typeof profileUpdateSchema>;
+export type EmailChangeRequestInput = z.infer<typeof emailChangeRequestSchema>;
+export type EmailChangeConfirmInput = z.infer<typeof emailChangeConfirmSchema>;
 
 export const apiError = (code: string, message: string, details?: unknown) => ({
   error: { code, message, details },
